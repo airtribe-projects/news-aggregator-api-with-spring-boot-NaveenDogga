@@ -1,0 +1,140 @@
+package com.example.newsapi;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.client.RestTemplate;
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.*;
+
+import com.example.newsapi.security.JwtAuthenticationFilter;
+import com.example.newsapi.security.JwtUtil;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
+
+import java.util.Date;
+
+@SpringBootApplication
+@EnableWebMvc
+@EnableWebSecurity
+public class NewsApiApplication extends WebSecurityConfigurerAdapter {
+    public static void main(String[] args) {
+        SpringApplication.run(NewsApiApplication.class, args);
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public JwtAuthenticationFilter jwtAuthenticationFilter() {
+        return new JwtAuthenticationFilter();
+    }
+
+    @Bean
+    public JwtUtil jwtUtil() {
+        return new JwtUtil("mySecretKey", 86400000); // 1-day expiration
+    }
+
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .authorizeRequests()
+            .antMatchers("/api/register", "/api/login").permitAll()
+            .anyRequest().authenticated()
+            .and()
+            .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            .and()
+            .addFilterBefore(jwtAuthenticationFilter(), UsernamePasswordAuthenticationFilter.class);
+    }
+
+    @RestController
+    @RequestMapping("/api")
+    public static class UserController {
+        private final Map<String, String> users = new HashMap<>();
+        private final Map<String, List<String>> preferences = new HashMap<>();
+        private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+        private final JwtUtil jwtUtil = new JwtUtil("mySecretKey", 86400000);
+        private final RestTemplate restTemplate = new RestTemplate();
+
+        private static final String NEWS_API_URL = "https://newsapi.org/v2/top-headlines?apiKey=YOUR_API_KEY&q=";
+
+        @PostMapping("/register")
+        public ResponseEntity<String> register(@RequestParam String username, @RequestParam String password) {
+            if (users.containsKey(username)) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("User already exists");
+            }
+            users.put(username, passwordEncoder.encode(password));
+            preferences.put(username, new ArrayList<>());
+            return ResponseEntity.ok("User registered successfully");
+        }
+
+        @PostMapping("/login")
+        public ResponseEntity<String> login(@RequestParam String username, @RequestParam String password) {
+            if (!users.containsKey(username) || !passwordEncoder.matches(password, users.get(username))) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+            }
+            String token = jwtUtil.generateToken(username);
+            return ResponseEntity.ok(token);
+        }
+
+        @GetMapping("/preferences")
+        public ResponseEntity<List<String>> getPreferences(@RequestHeader("Authorization") String token) {
+            String username = jwtUtil.extractUsername(token.substring(7));
+            return ResponseEntity.ok(preferences.getOrDefault(username, new ArrayList<>()));
+        }
+
+        @PutMapping("/preferences")
+        public ResponseEntity<String> updatePreferences(@RequestHeader("Authorization") String token, @RequestBody List<String> newPreferences) {
+            String username = jwtUtil.extractUsername(token.substring(7));
+            preferences.put(username, newPreferences);
+            return ResponseEntity.ok("Preferences updated successfully");
+        }
+
+        @GetMapping("/news")
+        public ResponseEntity<String> getNews(@RequestHeader("Authorization") String token) {
+            String username = jwtUtil.extractUsername(token.substring(7));
+            List<String> userPreferences = preferences.getOrDefault(username, new ArrayList<>());
+            
+            if (userPreferences.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("No preferences set");
+            }
+            
+            String query = String.join("+", userPreferences);
+            String url = NEWS_API_URL + query;
+            String newsResponse = restTemplate.getForObject(url, String.class);
+            
+            return ResponseEntity.ok(newsResponse);
+        }
+    }
+}
